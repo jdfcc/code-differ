@@ -3,9 +3,9 @@ import { computeLineDiff, classifyChanges, computeInlineDiff } from '../core/dif
 import { alignLines, unifiedLines, foldUnchanged } from '../core/line-aligner.js'
 import { transformText } from '../core/text-transform.js'
 
-export const SAMPLE_OLD = `Hello World`
+export const SAMPLE_OLD = ``
 
-export const SAMPLE_NEW = `Hello Vue`
+export const SAMPLE_NEW = ``
 
 export const store = reactive({
   // 输入
