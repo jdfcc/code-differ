@@ -3,15 +3,15 @@ import { computeLineDiff, classifyChanges, computeInlineDiff } from '../core/dif
 import { alignLines, unifiedLines, foldUnchanged } from '../core/line-aligner.js'
 import { transformText } from '../core/text-transform.js'
 
-const SAMPLE_OLD = `Hello World`
+export const SAMPLE_OLD = `Hello World`
 
-const SAMPLE_NEW = `Hello Vue`
+export const SAMPLE_NEW = `Hello Vue`
 
 export const store = reactive({
   // 输入
-  oldText: SAMPLE_OLD,
-  newText: SAMPLE_NEW,
-  title: 'FRS34',
+  oldText: '',
+  newText: '',
+  title: '',
 
   // 设置
   viewMode: 'split', // 'split' | 'unified'
