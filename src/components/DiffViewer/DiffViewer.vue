@@ -1,33 +1,142 @@
 <script setup>
-import { ref, computed, watch, nextTick, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { store, splitRows, unifiedRows, stats } from '../../store/diff-store.js'
 import { computeInlineDiff } from '../../core/diff-engine.js'
 import hljs from 'highlight.js'
 
+const ROW_HEIGHT = 21
+const BUFFER = 20 // 上下额外渲染的行数
+
+// --- Split pane ratio ---
+const splitContainer = ref(null)
+const leftPaneRatio = ref(0.5)
+const draggingSplit = ref(false)
+
+function onSplitHandleDown(e) {
+  e.preventDefault()
+  draggingSplit.value = true
+  document.body.style.userSelect = 'none'
+  document.addEventListener('mousemove', onSplitDragMove)
+  document.addEventListener('mouseup', onSplitDragEnd)
+}
+
+function onSplitDragMove(e) {
+  const container = splitContainer.value
+  if (!container) return
+  const rect = container.getBoundingClientRect()
+  const ratio = (e.clientX - rect.left) / rect.width
+  leftPaneRatio.value = Math.max(0.15, Math.min(0.85, ratio))
+}
+
+function onSplitDragEnd() {
+  draggingSplit.value = false
+  document.body.style.userSelect = ''
+  document.removeEventListener('mousemove', onSplitDragMove)
+  document.removeEventListener('mouseup', onSplitDragEnd)
+}
+
+// --- 虚拟滚动状态 ---
 const leftPane = ref(null)
 const rightPane = ref(null)
+const unifiedPane = ref(null)
+const scrollTop = ref(0)
+const containerHeight = ref(600)
+
 let isSyncing = false
 
-function syncScroll(source, target) {
+function onSplitScroll(source, target) {
   if (isSyncing) return
   isSyncing = true
-  target.scrollTop = source.scrollTop
-  target.scrollLeft = source.scrollLeft
+  if (target) {
+    target.scrollTop = source.scrollTop
+    target.scrollLeft = source.scrollLeft
+  }
+  scrollTop.value = source.scrollTop
   requestAnimationFrame(() => { isSyncing = false })
 }
 
 function onLeftScroll() {
-  if (leftPane.value && rightPane.value) {
-    syncScroll(leftPane.value, rightPane.value)
+  if (leftPane.value) {
+    onSplitScroll(leftPane.value, rightPane.value)
   }
 }
 function onRightScroll() {
-  if (leftPane.value && rightPane.value) {
-    syncScroll(rightPane.value, leftPane.value)
+  if (rightPane.value) {
+    onSplitScroll(rightPane.value, leftPane.value)
+  }
+}
+function onUnifiedScroll() {
+  if (unifiedPane.value) {
+    scrollTop.value = unifiedPane.value.scrollTop
   }
 }
 
-// 语法高亮
+// 当前活动的行数据
+const activeRows = computed(() =>
+  store.viewMode === 'split' ? splitRows.value : unifiedRows.value
+)
+
+// 虚拟滚动计算：可见范围
+const visibleRange = computed(() => {
+  const total = activeRows.value.length
+  const start = Math.max(0, Math.floor(scrollTop.value / ROW_HEIGHT) - BUFFER)
+  const visibleCount = Math.ceil(containerHeight.value / ROW_HEIGHT) + BUFFER * 2
+  const end = Math.min(total, start + visibleCount)
+  return { start, end }
+})
+
+const totalHeight = computed(() => activeRows.value.length * ROW_HEIGHT)
+const offsetY = computed(() => visibleRange.value.start * ROW_HEIGHT)
+const visibleRows = computed(() => {
+  const { start, end } = visibleRange.value
+  return activeRows.value.slice(start, end)
+})
+
+// 数据变化时重置滚动
+watch(activeRows, () => {
+  scrollTop.value = 0
+  if (leftPane.value) leftPane.value.scrollTop = 0
+  if (rightPane.value) rightPane.value.scrollTop = 0
+  if (unifiedPane.value) unifiedPane.value.scrollTop = 0
+})
+
+// 测量容器高度
+let resizeObserver = null
+onMounted(() => {
+  updateContainerHeight()
+  resizeObserver = new ResizeObserver(updateContainerHeight)
+  const el = leftPane.value || unifiedPane.value
+  if (el) resizeObserver.observe(el)
+})
+onBeforeUnmount(() => {
+  resizeObserver?.disconnect()
+  document.removeEventListener('mousemove', onSplitDragMove)
+  document.removeEventListener('mouseup', onSplitDragEnd)
+})
+
+// viewMode 切换后重新观察
+watch(() => store.viewMode, () => {
+  scrollTop.value = 0
+  resizeObserver?.disconnect()
+  setTimeout(() => {
+    updateContainerHeight()
+    const el = leftPane.value || unifiedPane.value
+    if (el) resizeObserver?.observe(el)
+  })
+})
+
+function updateContainerHeight() {
+  const el = leftPane.value || unifiedPane.value
+  if (el) containerHeight.value = el.clientHeight
+}
+
+// --- 渲染 ---
+// 渲染缓存：避免重复的高亮/diff 计算
+const renderCache = new Map()
+watch(activeRows, () => renderCache.clear())
+watch(() => store.precision, () => renderCache.clear())
+watch(() => store.syntaxLang, () => renderCache.clear())
+
 function highlight(code, lang) {
   if (!code) return ''
   try {
@@ -47,7 +156,6 @@ function escapeHtml(text) {
     .replace(/>/g, '&gt;')
 }
 
-// 行内 diff 渲染
 function renderInlineDiff(oldContent, newContent, side) {
   if (!oldContent && !newContent) return ''
   const parts = computeInlineDiff(oldContent || '', newContent || '', store.precision)
@@ -65,36 +173,60 @@ function renderInlineDiff(oldContent, newContent, side) {
   return html
 }
 
-// 为 split view 渲染行内容
-function renderSplitLine(row, side) {
+function renderSplitLine(row, side, idx) {
+  const cacheKey = `s_${idx}_${side}`
+  if (renderCache.has(cacheKey)) return renderCache.get(cacheKey)
+
   const cell = row[side]
   if (!cell || cell.type === 'placeholder') return ''
 
-  // 对 modified 的行做行内 diff
+  let html
   if (cell.type === 'modified') {
     const otherSide = side === 'left' ? 'right' : 'left'
     const other = row[otherSide]
     if (other && other.type === 'modified') {
-      return renderInlineDiff(row.left.content, row.right.content, side)
+      html = renderInlineDiff(row.left.content, row.right.content, side)
+    } else {
+      html = escapeHtml(cell.content)
     }
+  } else if (store.syntaxLang !== 'auto') {
+    html = highlight(cell.content, store.syntaxLang)
+  } else {
+    html = escapeHtml(cell.content)
   }
 
-  // 语法高亮
-  if (store.syntaxLang !== 'auto') {
-    return highlight(cell.content, store.syntaxLang)
-  }
-  return escapeHtml(cell.content)
+  renderCache.set(cacheKey, html)
+  return html
 }
 
-// unified view 行内容
-function renderUnifiedLine(row) {
-  return escapeHtml(row.content)
+function renderUnifiedLine(row, idx) {
+  const cacheKey = `u_${idx}`
+  if (renderCache.has(cacheKey)) return renderCache.get(cacheKey)
+  const html = escapeHtml(row.content)
+  renderCache.set(cacheKey, html)
+  return html
 }
 
 function goToFirstDiff() {
-  const el = document.querySelector('.line-removed, .line-added, .line-modified')
-  if (el) {
-    el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  // 找到第一个 diff 行的索引
+  const rows = activeRows.value
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i]
+    if (store.viewMode === 'split') {
+      const t = row.left?.type || row.right?.type
+      if (t === 'removed' || t === 'added' || t === 'modified') {
+        const target = i * ROW_HEIGHT - containerHeight.value / 2
+        const el = leftPane.value || rightPane.value
+        if (el) el.scrollTop = Math.max(0, target)
+        return
+      }
+    } else {
+      if (row.type === 'removed' || row.type === 'added') {
+        const target = i * ROW_HEIGHT - containerHeight.value / 2
+        if (unifiedPane.value) unifiedPane.value.scrollTop = Math.max(0, target)
+        return
+      }
+    }
   }
 }
 
@@ -116,89 +248,106 @@ defineExpose({ goToFirstDiff })
   <div class="diff-viewer">
     <!-- Split View -->
     <template v-if="store.viewMode === 'split'">
-      <!-- Headers -->
       <div class="pane-headers">
-        <div class="pane-header pane-header-left">
+        <div class="pane-header pane-header-left" :style="{ flex: leftPaneRatio }">
           <span class="pane-badge removed-badge">删除</span>
           <span class="pane-stat">{{ stats.oldLines }} 行</span>
           <button class="copy-btn" @click="copyAllLeft" title="复制">全部复制</button>
         </div>
-        <div class="pane-header pane-header-right">
+        <div class="pane-header pane-header-right" :style="{ flex: 1 - leftPaneRatio }">
           <span class="pane-badge added-badge">添加</span>
           <span class="pane-stat">{{ stats.newLines }} 行</span>
           <button class="copy-btn" @click="copyAllRight" title="复制">全部复制</button>
         </div>
       </div>
 
-      <!-- Code panes -->
-      <div class="split-container">
+      <div class="split-container" ref="splitContainer">
         <div
-          class="code-pane"
+          class="code-pane code-pane-left"
           :class="{ 'wrap-lines': store.wrapLines }"
+          :style="{ flex: leftPaneRatio }"
           ref="leftPane"
           @scroll="onLeftScroll"
         >
-          <table class="diff-table">
-            <tbody>
-              <template v-for="(row, idx) in splitRows" :key="'l' + idx">
-                <tr v-if="row.type === 'fold'" class="fold-row" @click="expandFold(row)">
-                  <td colspan="2" class="fold-cell">
-                    ⋯ 展开 {{ row.count }} 行未更改 ⋯
-                  </td>
-                </tr>
-                <tr v-else :class="'line-' + (row.left?.type || '')">
-                  <td class="line-no">{{ row.left?.lineNo ?? '' }}</td>
-                  <td class="line-content" v-html="renderSplitLine(row, 'left')"></td>
-                </tr>
-              </template>
-            </tbody>
-          </table>
+          <div :style="{ height: totalHeight + 'px', position: 'relative' }">
+            <table class="diff-table" :style="{ position: 'absolute', top: offsetY + 'px', left: 0, right: 0 }">
+              <tbody>
+                <template v-for="(row, i) in visibleRows" :key="'l' + (visibleRange.start + i)">
+                  <tr v-if="row.type === 'fold'" class="fold-row" @click="expandFold(row)">
+                    <td colspan="2" class="fold-cell">
+                      ⋯ 展开 {{ row.count }} 行未更改 ⋯
+                    </td>
+                  </tr>
+                  <tr v-else :class="'line-' + (row.left?.type || '')">
+                    <td class="line-no">{{ row.left?.lineNo ?? '' }}</td>
+                    <td class="line-content" v-html="renderSplitLine(row, 'left', visibleRange.start + i)"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
         </div>
 
         <div
-          class="code-pane"
+          class="resize-handle-h"
+          :class="{ active: draggingSplit }"
+          @mousedown="onSplitHandleDown"
+        ></div>
+
+        <div
+          class="code-pane code-pane-right"
           :class="{ 'wrap-lines': store.wrapLines }"
+          :style="{ flex: 1 - leftPaneRatio }"
           ref="rightPane"
           @scroll="onRightScroll"
         >
-          <table class="diff-table">
-            <tbody>
-              <template v-for="(row, idx) in splitRows" :key="'r' + idx">
-                <tr v-if="row.type === 'fold'" class="fold-row" @click="expandFold(row)">
-                  <td colspan="2" class="fold-cell">
-                    ⋯ 展开 {{ row.count }} 行未更改 ⋯
-                  </td>
-                </tr>
-                <tr v-else :class="'line-' + (row.right?.type || '')">
-                  <td class="line-no">{{ row.right?.lineNo ?? '' }}</td>
-                  <td class="line-content" v-html="renderSplitLine(row, 'right')"></td>
-                </tr>
-              </template>
-            </tbody>
-          </table>
+          <div :style="{ height: totalHeight + 'px', position: 'relative' }">
+            <table class="diff-table" :style="{ position: 'absolute', top: offsetY + 'px', left: 0, right: 0 }">
+              <tbody>
+                <template v-for="(row, i) in visibleRows" :key="'r' + (visibleRange.start + i)">
+                  <tr v-if="row.type === 'fold'" class="fold-row" @click="expandFold(row)">
+                    <td colspan="2" class="fold-cell">
+                      ⋯ 展开 {{ row.count }} 行未更改 ⋯
+                    </td>
+                  </tr>
+                  <tr v-else :class="'line-' + (row.right?.type || '')">
+                    <td class="line-no">{{ row.right?.lineNo ?? '' }}</td>
+                    <td class="line-content" v-html="renderSplitLine(row, 'right', visibleRange.start + i)"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
     </template>
 
     <!-- Unified View -->
     <template v-else>
-      <div class="unified-container" :class="{ 'wrap-lines': store.wrapLines }">
-        <table class="diff-table unified-table">
-          <tbody>
-            <template v-for="(row, idx) in unifiedRows" :key="'u' + idx">
-              <tr v-if="row.type === 'fold'" class="fold-row" @click="expandFold(row)">
-                <td colspan="3" class="fold-cell">
-                  ⋯ 展开 {{ row.count }} 行未更改 ⋯
-                </td>
-              </tr>
-              <tr v-else :class="'line-' + row.type">
-                <td class="line-no">{{ row.leftLineNo ?? '' }}</td>
-                <td class="line-no">{{ row.rightLineNo ?? '' }}</td>
-                <td class="line-content" v-html="renderUnifiedLine(row)"></td>
-              </tr>
-            </template>
-          </tbody>
-        </table>
+      <div
+        class="unified-container"
+        :class="{ 'wrap-lines': store.wrapLines }"
+        ref="unifiedPane"
+        @scroll="onUnifiedScroll"
+      >
+        <div :style="{ height: totalHeight + 'px', position: 'relative' }">
+          <table class="diff-table unified-table" :style="{ position: 'absolute', top: offsetY + 'px', left: 0, right: 0 }">
+            <tbody>
+              <template v-for="(row, i) in visibleRows" :key="'u' + (visibleRange.start + i)">
+                <tr v-if="row.type === 'fold'" class="fold-row" @click="expandFold(row)">
+                  <td colspan="3" class="fold-cell">
+                    ⋯ 展开 {{ row.count }} 行未更改 ⋯
+                  </td>
+                </tr>
+                <tr v-else :class="'line-' + row.type">
+                  <td class="line-no">{{ row.leftLineNo ?? '' }}</td>
+                  <td class="line-no">{{ row.rightLineNo ?? '' }}</td>
+                  <td class="line-content" v-html="renderUnifiedLine(row, visibleRange.start + i)"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
       </div>
     </template>
   </div>
@@ -220,7 +369,6 @@ defineExpose({ goToFirstDiff })
   flex-shrink: 0;
 }
 .pane-header {
-  flex: 1;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -258,11 +406,19 @@ defineExpose({ goToFirstDiff })
   overflow: hidden;
 }
 .code-pane {
-  flex: 1;
   overflow: auto;
-  border-right: 1px solid #e8e8e8;
 }
-.code-pane:last-child { border-right: none; }
+.code-pane-left { border-right: 1px solid #e8e8e8; }
+
+/* Split pane resize handle */
+.resize-handle-h {
+  width: 5px;
+  cursor: col-resize;
+  background: transparent;
+  transition: background 0.15s;
+  flex-shrink: 0;
+}
+.resize-handle-h:hover, .resize-handle-h.active { background: #10b981; }
 
 /* Diff table */
 .diff-table {
@@ -289,6 +445,8 @@ defineExpose({ goToFirstDiff })
   padding: 0 12px;
   white-space: pre;
   overflow: hidden;
+  height: 21px;
+  line-height: 21px;
 }
 .wrap-lines .line-content {
   white-space: pre-wrap;
@@ -302,13 +460,13 @@ defineExpose({ goToFirstDiff })
 .line-placeholder { background: #f8f8f8; }
 
 /* In split view, left pane modified = red bg, right pane modified = green bg */
-.code-pane:first-child .line-modified { background: #fff0f0; }
-.code-pane:last-child .line-modified { background: #f0fff0; }
+.code-pane-left .line-modified { background: #fff0f0; }
+.code-pane-right .line-modified { background: #f0fff0; }
 
 tr.line-removed .line-no { background: #ffe0e0; color: #c0392b; }
 tr.line-added .line-no { background: #d4edda; color: #27ae60; }
-.code-pane:first-child tr.line-modified .line-no { background: #ffe0e0; color: #c0392b; }
-.code-pane:last-child tr.line-modified .line-no { background: #d4edda; color: #27ae60; }
+.code-pane-left tr.line-modified .line-no { background: #ffe0e0; color: #c0392b; }
+.code-pane-right tr.line-modified .line-no { background: #d4edda; color: #27ae60; }
 
 /* Inline diff highlights */
 :deep(.inline-removed) {
@@ -332,6 +490,8 @@ tr.line-added .line-no { background: #d4edda; color: #27ae60; }
   font-size: 12px;
   border-top: 1px solid #d6e4f0;
   border-bottom: 1px solid #d6e4f0;
+  height: 21px;
+  line-height: 9px;
 }
 .fold-row:hover .fold-cell { background: #e0ecff; }
 

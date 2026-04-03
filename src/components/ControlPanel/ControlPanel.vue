@@ -115,8 +115,6 @@ const emit = defineEmits(['goToFirstDiff'])
 
 <style scoped>
 .control-panel {
-  width: 200px;
-  min-width: 200px;
   background: #fafafa;
   border-right: 1px solid #e8e8e8;
   padding: 16px;

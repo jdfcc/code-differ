@@ -2,6 +2,7 @@
 import { ref } from 'vue'
 import { store, stats } from '../../store/diff-store.js'
 import { createShareIssue } from '../../utils/github.js'
+import { exportFullHtml } from '../../utils/export-html.js'
 
 const sharing = ref(false)
 
@@ -12,13 +13,12 @@ function clearAll() {
 }
 
 function exportDiff() {
-  const rows = document.querySelector('.diff-viewer')
-  if (!rows) return
-  const blob = new Blob([rows.innerText], { type: 'text/plain;charset=utf-8' })
+  const html = exportFullHtml()
+  const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = `${store.title || 'diff'}.txt`
+  a.download = `${store.title || 'diff'}.html`
   a.click()
   URL.revokeObjectURL(url)
 }
@@ -32,7 +32,8 @@ async function shareDiff() {
   sharing.value = true
   try {
     const issueNumber = await createShareIssue(store.title, store.oldText, store.newText)
-    const url = `${location.origin}${location.pathname}#issue=${issueNumber}`
+    const base = import.meta.env.VITE_SHARE_BASE_URL || `${location.origin}${location.pathname}`
+    const url = `${base.replace(/\/+$/, '')}#issue=${issueNumber}`
     await navigator.clipboard.writeText(url)
     alert('分享链接已复制到剪贴板')
   } catch (e) {

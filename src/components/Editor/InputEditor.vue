@@ -59,7 +59,8 @@ import { store } from '../../store/diff-store.js'
 .editor-body {
   display: flex;
   gap: 0;
-  height: 200px;
+  flex: 1;
+  overflow: hidden;
 }
 .editor-col {
   flex: 1;
