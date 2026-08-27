@@ -182,18 +182,52 @@ function escapeHtml(text) {
 function renderInlineDiff(oldContent, newContent, side) {
   if (!oldContent && !newContent) return ''
   const parts = computeInlineDiff(oldContent || '', newContent || '', store.precision)
-  let html = ''
+  const content = side === 'left' ? oldContent : newContent
+  const markedRanges = []
+  let position = 0
   for (const part of parts) {
-    const escaped = escapeHtml(part.value)
-    if (side === 'left' && part.removed) {
-      html += `<span class="inline-removed">${escaped}</span>`
-    } else if (side === 'right' && part.added) {
-      html += `<span class="inline-added">${escaped}</span>`
-    } else if (!part.added && !part.removed) {
-      html += escaped
-    }
+    const belongsToSide = side === 'left' ? !part.added : !part.removed
+    if (!belongsToSide) continue
+    const changed = side === 'left' ? part.removed : part.added
+    if (changed) markedRanges.push({ start: position, end: position + part.value.length })
+    position += part.value.length
   }
-  return html
+
+  const highlighted = highlight(content, store.syntaxLang)
+  if (!markedRanges.length || typeof document === 'undefined') return highlighted
+
+  // Highlight.js 先生成语法节点，再按原始文本偏移包裹增删片段，
+  // 从而保留两类标记，而不会因字符级 diff 打碎语法 token。
+  const container = document.createElement('div')
+  container.innerHTML = highlighted
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT)
+  const textNodes = []
+  let offset = 0
+  while (walker.nextNode()) {
+    const node = walker.currentNode
+    textNodes.push({ node, start: offset, end: offset + node.data.length })
+    offset += node.data.length
+  }
+
+  for (const { node, start, end } of textNodes) {
+    const overlaps = markedRanges.filter(range => range.start < end && range.end > start)
+    if (!overlaps.length) continue
+    const fragment = document.createDocumentFragment()
+    let local = 0
+    for (const range of overlaps) {
+      const from = Math.max(0, range.start - start)
+      const to = Math.min(node.data.length, range.end - start)
+      if (from > local) fragment.append(node.data.slice(local, from))
+      const mark = document.createElement('span')
+      mark.className = side === 'left' ? 'inline-removed' : 'inline-added'
+      mark.textContent = node.data.slice(from, to)
+      fragment.append(mark)
+      local = to
+    }
+    if (local < node.data.length) fragment.append(node.data.slice(local))
+    node.replaceWith(fragment)
+  }
+  return container.innerHTML
 }
 
 function renderSplitLine(row, side, idx) {
@@ -604,6 +638,23 @@ tr.line-added .line-no { background: #d4edda; color: #27ae60; }
   background: #90ee90;
   border-radius: 2px;
 }
+
+/* Highlight.js theme — works in both split and unified views. */
+:deep(.hljs-comment), :deep(.hljs-quote) { color: #6a737d; font-style: italic; }
+:deep(.hljs-keyword), :deep(.hljs-selector-tag), :deep(.hljs-subst) { color: #d73a49; font-weight: 600; }
+:deep(.hljs-number), :deep(.hljs-literal), :deep(.hljs-variable), :deep(.hljs-template-variable),
+:deep(.hljs-tag .hljs-attr) { color: #005cc5; }
+:deep(.hljs-string), :deep(.hljs-doctag) { color: #032f62; }
+:deep(.hljs-title), :deep(.hljs-section), :deep(.hljs-selector-id) { color: #6f42c1; font-weight: 600; }
+:deep(.hljs-type), :deep(.hljs-class .hljs-title), :deep(.hljs-built_in) { color: #e36209; }
+:deep(.hljs-attribute), :deep(.hljs-name), :deep(.hljs-selector-class) { color: #22863a; }
+:deep(.hljs-regexp), :deep(.hljs-link) { color: #032f62; }
+:deep(.hljs-symbol), :deep(.hljs-bullet) { color: #735c0f; }
+:deep(.hljs-meta) { color: #005cc5; }
+:deep(.hljs-deletion) { color: #b31d28; background: #ffeef0; }
+:deep(.hljs-addition) { color: #22863a; background: #f0fff4; }
+:deep(.hljs-emphasis) { font-style: italic; }
+:deep(.hljs-strong) { font-weight: 700; }
 
 /* Fold row */
 .fold-row {
