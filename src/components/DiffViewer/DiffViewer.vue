@@ -1,8 +1,30 @@
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { store, splitRows, unifiedRows, stats } from '../../store/diff-store.js'
 import { computeInlineDiff } from '../../core/diff-engine.js'
-import hljs from 'highlight.js'
+import hljs from 'highlight.js/lib/core'
+import javascript from 'highlight.js/lib/languages/javascript'
+import python from 'highlight.js/lib/languages/python'
+import java from 'highlight.js/lib/languages/java'
+import c from 'highlight.js/lib/languages/c'
+import cpp from 'highlight.js/lib/languages/cpp'
+import csharp from 'highlight.js/lib/languages/csharp'
+import go from 'highlight.js/lib/languages/go'
+import rust from 'highlight.js/lib/languages/rust'
+import typescript from 'highlight.js/lib/languages/typescript'
+import xml from 'highlight.js/lib/languages/xml'
+import css from 'highlight.js/lib/languages/css'
+import sql from 'highlight.js/lib/languages/sql'
+import json from 'highlight.js/lib/languages/json'
+import yaml from 'highlight.js/lib/languages/yaml'
+import bash from 'highlight.js/lib/languages/bash'
+import php from 'highlight.js/lib/languages/php'
+import ruby from 'highlight.js/lib/languages/ruby'
+import swift from 'highlight.js/lib/languages/swift'
+import kotlin from 'highlight.js/lib/languages/kotlin'
+
+const languages = { javascript, python, java, c, cpp, csharp, go, rust, typescript, xml, html: xml, css, sql, json, yaml, bash, php, ruby, swift, kotlin }
+for (const [name, definition] of Object.entries(languages)) hljs.registerLanguage(name, definition)
 
 const ROW_HEIGHT = 21
 const BUFFER = 20 // 上下额外渲染的行数
@@ -79,14 +101,15 @@ const activeRows = computed(() =>
 // 虚拟滚动计算：可见范围
 const visibleRange = computed(() => {
   const total = activeRows.value.length
+  if (store.wrapLines) return { start: 0, end: total }
   const start = Math.max(0, Math.floor(scrollTop.value / ROW_HEIGHT) - BUFFER)
   const visibleCount = Math.ceil(containerHeight.value / ROW_HEIGHT) + BUFFER * 2
   const end = Math.min(total, start + visibleCount)
   return { start, end }
 })
 
-const totalHeight = computed(() => activeRows.value.length * ROW_HEIGHT)
-const offsetY = computed(() => visibleRange.value.start * ROW_HEIGHT)
+const totalHeight = computed(() => store.wrapLines ? null : activeRows.value.length * ROW_HEIGHT)
+const offsetY = computed(() => store.wrapLines ? 0 : visibleRange.value.start * ROW_HEIGHT)
 const visibleRows = computed(() => {
   const { start, end } = visibleRange.value
   return activeRows.value.slice(start, end)
@@ -189,10 +212,8 @@ function renderSplitLine(row, side, idx) {
     } else {
       html = escapeHtml(cell.content)
     }
-  } else if (store.syntaxLang !== 'auto') {
-    html = highlight(cell.content, store.syntaxLang)
   } else {
-    html = escapeHtml(cell.content)
+    html = highlight(cell.content, store.syntaxLang)
   }
 
   renderCache.set(cacheKey, html)
@@ -202,9 +223,84 @@ function renderSplitLine(row, side, idx) {
 function renderUnifiedLine(row, idx) {
   const cacheKey = `u_${idx}`
   if (renderCache.has(cacheKey)) return renderCache.get(cacheKey)
-  const html = escapeHtml(row.content)
+  const html = row.type === 'eof' ? escapeHtml(row.content) : highlight(row.content, store.syntaxLang)
   renderCache.set(cacheKey, html)
   return html
+}
+
+const editingKey = ref('')
+
+function sourceLine(side, lineNo) {
+  const text = side === 'old' ? store.oldText : store.newText
+  const lines = text.split(/\r?\n/)
+  if (!store.ignore.blankLines) return lines[lineNo - 1] ?? ''
+  let visible = 0
+  for (const line of lines) {
+    if (line.trim() === '') continue
+    visible++
+    if (visible === lineNo) return line
+  }
+  return ''
+}
+
+function replaceSourceLine(side, lineNo, content) {
+  const text = side === 'old' ? store.oldText : store.newText
+  const newline = text.includes('\r\n') ? '\r\n' : '\n'
+  const lines = text.split(/\r?\n/)
+  let index = lineNo - 1
+  if (store.ignore.blankLines) {
+    let visible = 0
+    index = lines.findIndex(line => {
+      if (line.trim() === '') return false
+      visible++
+      return visible === lineNo
+    })
+  }
+  if (index < 0 || index >= lines.length) return null
+  lines[index] = content
+  const updated = lines.join(newline)
+  if (side === 'old') store.oldText = updated
+  else store.newText = updated
+  return index + 1
+}
+
+async function startInlineEdit(event, key, side, lineNo) {
+  if (!lineNo) return
+  editingKey.value = key
+  store.showEditor = true
+  await nextTick()
+  const cell = event.currentTarget
+  cell.dataset.original = sourceLine(side, lineNo)
+  cell.textContent = cell.dataset.original
+  cell.focus()
+  const selection = window.getSelection()
+  const range = document.createRange()
+  range.selectNodeContents(cell)
+  selection.removeAllRanges()
+  selection.addRange(range)
+}
+
+function finishInlineEdit(event, key, side, lineNo) {
+  if (editingKey.value !== key) return
+  const cell = event.currentTarget
+  if (cell.dataset.cancelled !== 'true') {
+    const sourceLineNo = replaceSourceLine(side, lineNo, cell.textContent)
+    if (sourceLineNo) store.editTarget = { side, lineNo: sourceLineNo }
+  }
+  delete cell.dataset.cancelled
+  editingKey.value = ''
+}
+
+function onInlineKeydown(event) {
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault()
+    event.currentTarget.blur()
+  } else if (event.key === 'Escape') {
+    event.preventDefault()
+    event.currentTarget.dataset.cancelled = 'true'
+    event.currentTarget.textContent = event.currentTarget.dataset.original || ''
+    event.currentTarget.blur()
+  }
 }
 
 function goToFirstDiff() {
@@ -213,15 +309,15 @@ function goToFirstDiff() {
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i]
     if (store.viewMode === 'split') {
-      const t = row.left?.type || row.right?.type
-      if (t === 'removed' || t === 'added' || t === 'modified') {
+      const types = [row.left?.type, row.right?.type]
+      if (types.some(t => t === 'removed' || t === 'added' || t === 'modified' || t === 'eof')) {
         const target = i * ROW_HEIGHT - containerHeight.value / 2
         const el = leftPane.value || rightPane.value
         if (el) el.scrollTop = Math.max(0, target)
         return
       }
     } else {
-      if (row.type === 'removed' || row.type === 'added') {
+      if (row.type === 'removed' || row.type === 'added' || row.type === 'eof') {
         const target = i * ROW_HEIGHT - containerHeight.value / 2
         if (unifiedPane.value) unifiedPane.value.scrollTop = Math.max(0, target)
         return
@@ -230,12 +326,18 @@ function goToFirstDiff() {
   }
 }
 
-function copyAllLeft() {
-  navigator.clipboard.writeText(store.oldText)
+const copyMessage = ref('')
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text)
+    copyMessage.value = '已复制'
+  } catch {
+    copyMessage.value = '复制失败'
+  }
+  setTimeout(() => { copyMessage.value = '' }, 1600)
 }
-function copyAllRight() {
-  navigator.clipboard.writeText(store.newText)
-}
+function copyAllLeft() { copyText(store.oldText) }
+function copyAllRight() { copyText(store.newText) }
 
 function expandFold(fold) {
   store.foldUnchangedLines = false
@@ -252,12 +354,12 @@ defineExpose({ goToFirstDiff })
         <div class="pane-header pane-header-left" :style="{ flex: leftPaneRatio }">
           <span class="pane-badge removed-badge">删除</span>
           <span class="pane-stat">{{ stats.oldLines }} 行</span>
-          <button class="copy-btn" @click="copyAllLeft" title="复制">全部复制</button>
+          <button class="copy-btn" @click="copyAllLeft" title="复制">{{ copyMessage || '全部复制' }}</button>
         </div>
         <div class="pane-header pane-header-right" :style="{ flex: 1 - leftPaneRatio }">
           <span class="pane-badge added-badge">添加</span>
           <span class="pane-stat">{{ stats.newLines }} 行</span>
-          <button class="copy-btn" @click="copyAllRight" title="复制">全部复制</button>
+          <button class="copy-btn" @click="copyAllRight" title="复制">{{ copyMessage || '全部复制' }}</button>
         </div>
       </div>
 
@@ -269,8 +371,8 @@ defineExpose({ goToFirstDiff })
           ref="leftPane"
           @scroll="onLeftScroll"
         >
-          <div :style="{ height: totalHeight + 'px', position: 'relative' }">
-            <table class="diff-table" :style="{ position: 'absolute', top: offsetY + 'px', left: 0, right: 0 }">
+          <div :style="{ height: totalHeight == null ? 'auto' : totalHeight + 'px', position: 'relative' }">
+            <table class="diff-table" :style="{ position: store.wrapLines ? 'static' : 'absolute', top: offsetY + 'px', left: 0, right: 0 }">
               <tbody>
                 <template v-for="(row, i) in visibleRows" :key="'l' + (visibleRange.start + i)">
                   <tr v-if="row.type === 'fold'" class="fold-row" @click="expandFold(row)">
@@ -280,7 +382,12 @@ defineExpose({ goToFirstDiff })
                   </tr>
                   <tr v-else :class="'line-' + (row.left?.type || '')">
                     <td class="line-no">{{ row.left?.lineNo ?? '' }}</td>
-                    <td class="line-content" v-html="renderSplitLine(row, 'left', visibleRange.start + i)"></td>
+                    <td class="line-content" v-html="renderSplitLine(row, 'left', visibleRange.start + i)"
+                      :contenteditable="editingKey === 'l' + (visibleRange.start + i)"
+                      title="双击编辑此行"
+                      @dblclick="startInlineEdit($event, 'l' + (visibleRange.start + i), 'old', row.left?.lineNo)"
+                      @blur="finishInlineEdit($event, 'l' + (visibleRange.start + i), 'old', row.left?.lineNo)"
+                      @keydown="onInlineKeydown"></td>
                   </tr>
                 </template>
               </tbody>
@@ -301,8 +408,8 @@ defineExpose({ goToFirstDiff })
           ref="rightPane"
           @scroll="onRightScroll"
         >
-          <div :style="{ height: totalHeight + 'px', position: 'relative' }">
-            <table class="diff-table" :style="{ position: 'absolute', top: offsetY + 'px', left: 0, right: 0 }">
+          <div :style="{ height: totalHeight == null ? 'auto' : totalHeight + 'px', position: 'relative' }">
+            <table class="diff-table" :style="{ position: store.wrapLines ? 'static' : 'absolute', top: offsetY + 'px', left: 0, right: 0 }">
               <tbody>
                 <template v-for="(row, i) in visibleRows" :key="'r' + (visibleRange.start + i)">
                   <tr v-if="row.type === 'fold'" class="fold-row" @click="expandFold(row)">
@@ -312,7 +419,12 @@ defineExpose({ goToFirstDiff })
                   </tr>
                   <tr v-else :class="'line-' + (row.right?.type || '')">
                     <td class="line-no">{{ row.right?.lineNo ?? '' }}</td>
-                    <td class="line-content" v-html="renderSplitLine(row, 'right', visibleRange.start + i)"></td>
+                    <td class="line-content" v-html="renderSplitLine(row, 'right', visibleRange.start + i)"
+                      :contenteditable="editingKey === 'r' + (visibleRange.start + i)"
+                      title="双击编辑此行"
+                      @dblclick="startInlineEdit($event, 'r' + (visibleRange.start + i), 'new', row.right?.lineNo)"
+                      @blur="finishInlineEdit($event, 'r' + (visibleRange.start + i), 'new', row.right?.lineNo)"
+                      @keydown="onInlineKeydown"></td>
                   </tr>
                 </template>
               </tbody>
@@ -330,8 +442,8 @@ defineExpose({ goToFirstDiff })
         ref="unifiedPane"
         @scroll="onUnifiedScroll"
       >
-        <div :style="{ height: totalHeight + 'px', position: 'relative' }">
-          <table class="diff-table unified-table" :style="{ position: 'absolute', top: offsetY + 'px', left: 0, right: 0 }">
+        <div :style="{ height: totalHeight == null ? 'auto' : totalHeight + 'px', position: 'relative' }">
+          <table class="diff-table unified-table" :style="{ position: store.wrapLines ? 'static' : 'absolute', top: offsetY + 'px', left: 0, right: 0 }">
             <tbody>
               <template v-for="(row, i) in visibleRows" :key="'u' + (visibleRange.start + i)">
                 <tr v-if="row.type === 'fold'" class="fold-row" @click="expandFold(row)">
@@ -342,7 +454,12 @@ defineExpose({ goToFirstDiff })
                 <tr v-else :class="'line-' + row.type">
                   <td class="line-no">{{ row.leftLineNo ?? '' }}</td>
                   <td class="line-no">{{ row.rightLineNo ?? '' }}</td>
-                  <td class="line-content" v-html="renderUnifiedLine(row, visibleRange.start + i)"></td>
+                  <td class="line-content" v-html="renderUnifiedLine(row, visibleRange.start + i)"
+                    :contenteditable="editingKey === 'u' + (visibleRange.start + i)"
+                    title="双击编辑此行"
+                    @dblclick="startInlineEdit($event, 'u' + (visibleRange.start + i), row.type === 'removed' ? 'old' : 'new', row.type === 'removed' ? row.leftLineNo : row.rightLineNo)"
+                    @blur="finishInlineEdit($event, 'u' + (visibleRange.start + i), row.type === 'removed' ? 'old' : 'new', row.type === 'removed' ? row.leftLineNo : row.rightLineNo)"
+                    @keydown="onInlineKeydown"></td>
                 </tr>
               </template>
             </tbody>
@@ -448,9 +565,18 @@ defineExpose({ goToFirstDiff })
   height: 21px;
   line-height: 21px;
 }
+.line-content[contenteditable="true"] {
+  outline: 2px solid #10b981;
+  outline-offset: -2px;
+  background: #ecfdf5;
+  cursor: text;
+  overflow: visible;
+}
 .wrap-lines .line-content {
   white-space: pre-wrap;
   word-break: break-all;
+  height: auto;
+  overflow: visible;
 }
 
 /* Line types */
@@ -458,6 +584,7 @@ defineExpose({ goToFirstDiff })
 .line-removed { background: #fff0f0; }
 .line-added { background: #f0fff0; }
 .line-placeholder { background: #f8f8f8; }
+.line-eof { background: #fff8dc; color: #8a6d3b; font-style: italic; }
 
 /* In split view, left pane modified = red bg, right pane modified = green bg */
 .code-pane-left .line-modified { background: #fff0f0; }

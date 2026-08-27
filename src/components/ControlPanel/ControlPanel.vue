@@ -1,6 +1,5 @@
 <script setup>
 import { store } from '../../store/diff-store.js'
-import hljs from 'highlight.js'
 import { computed } from 'vue'
 
 const languages = computed(() => {

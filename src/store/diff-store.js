@@ -1,11 +1,15 @@
-import { reactive, computed, watch } from 'vue'
-import { computeLineDiff, classifyChanges, computeInlineDiff } from '../core/diff-engine.js'
+import { reactive, computed } from 'vue'
+import { computeLineDiff, classifyChanges } from '../core/diff-engine.js'
 import { alignLines, unifiedLines, foldUnchanged } from '../core/line-aligner.js'
 import { transformText } from '../core/text-transform.js'
 
-export const SAMPLE_OLD = ``
+export const SAMPLE_OLD = `function greet(name) {
+  return 'Hello, ' + name
+}`
 
-export const SAMPLE_NEW = ``
+export const SAMPLE_NEW = `function greet(name = 'World') {
+  return \`Hello, \${name}!\`
+}`
 
 export const store = reactive({
   // 输入
@@ -20,6 +24,7 @@ export const store = reactive({
   wrapLines: false,
   syntaxLang: 'javascript',
   showEditor: false,
+  editTarget: null,
 
   // 忽略选项
   ignore: {
@@ -51,11 +56,20 @@ export const diffResult = computed(() => {
   const oldTransformed = transformText(oldText, opts)
   const newTransformed = transformText(newText, opts)
 
-  const changes = computeLineDiff(oldTransformed, newTransformed, {
+  const oldHasFinalNewline = /\r?\n$/.test(oldTransformed)
+  const newHasFinalNewline = /\r?\n$/.test(newTransformed)
+  const oldComparable = oldHasFinalNewline ? oldTransformed.replace(/\r?\n$/, '') : oldTransformed
+  const newComparable = newHasFinalNewline ? newTransformed.replace(/\r?\n$/, '') : newTransformed
+
+  const changes = computeLineDiff(oldComparable, newComparable, {
     ignoreWhitespace: store.ignore.whitespace,
   })
 
-  return classifyChanges(changes)
+  const classified = classifyChanges(changes)
+  if (oldHasFinalNewline !== newHasFinalNewline) {
+    classified.push({ type: 'eof', oldHasFinalNewline, newHasFinalNewline })
+  }
+  return classified
 })
 
 export const splitRows = computed(() => {

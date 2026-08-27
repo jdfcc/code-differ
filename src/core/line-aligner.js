@@ -52,6 +52,17 @@ export function alignLines(classifiedChanges) {
         }
         break
       }
+
+      case 'eof':
+        rows.push({
+          left: chunk.oldHasFinalNewline
+            ? { lineNo: null, content: '', type: 'placeholder' }
+            : { lineNo: null, content: '\\ No newline at end of file', type: 'eof' },
+          right: chunk.newHasFinalNewline
+            ? { lineNo: null, content: '', type: 'placeholder' }
+            : { lineNo: null, content: '\\ No newline at end of file', type: 'eof' },
+        })
+        break
     }
   }
 
@@ -118,6 +129,17 @@ export function unifiedLines(classifiedChanges) {
             type: 'added',
           })
         }
+        break
+
+
+      case 'eof':
+        rows.push({
+          leftLineNo: null,
+          rightLineNo: null,
+          content: '\\ No newline at end of file',
+          type: 'eof',
+          side: chunk.oldHasFinalNewline ? 'right' : 'left',
+        })
         break
     }
   }

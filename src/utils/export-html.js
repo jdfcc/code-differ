@@ -1,8 +1,9 @@
 import { store, stats } from '../store/diff-store.js'
-import diffLibRaw from '../core/diff-lib.min.js?raw'
+import diffLibRaw from '../../node_modules/diff/dist/diff.min.js?raw'
 import diffEngineRaw from '../core/diff-engine.js?raw'
 import lineAlignerRaw from '../core/line-aligner.js?raw'
 import textTransformRaw from '../core/text-transform.js?raw'
+import lzStringRaw from 'lz-string/libs/lz-string.min.js?raw'
 
 function esc(text) {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
@@ -75,6 +76,7 @@ details[open] > .clickable::before { transform: rotate(90deg); }
 .line-removed { background: #fff0f0; }
 .line-added { background: #f0fff0; }
 .line-placeholder { background: #f8f8f8; }
+.line-eof { background: #fff8dc; color: #8a6d3b; font-style: italic; }
 .code-pane:first-child .line-modified { background: #fff0f0; }
 .code-pane:last-child .line-modified { background: #f0fff0; }
 tr.line-removed .line-no { background: #ffe0e0; color: #c0392b; }
@@ -122,6 +124,8 @@ function buildCoreBundle() {
     .replace(/^export\s+/gm, '')
 
   return `${diffLib}
+// compression library
+${lzStringRaw}
 // text-transform
 ${textTransform}
 // diff-engine
@@ -140,6 +144,7 @@ var state = {
   precision: 'word',
   foldUnchangedLines: false,
   wrapLines: false,
+  syntaxLang: 'javascript',
   showEditor: false,
   ignore: { whitespace: false, case: false, blankLines: false },
   transform: { trimTrailing: false, normalizeWhitespace: false },
@@ -154,6 +159,7 @@ function loadState() {
   state.precision = d.precision;
   state.foldUnchangedLines = d.foldUnchangedLines;
   state.wrapLines = d.wrapLines;
+  state.syntaxLang = d.syntaxLang || 'javascript';
   state.ignore = d.ignore;
   state.transform = d.transform;
   state.share = d.share || {};
@@ -172,8 +178,13 @@ function computeDiff() {
   };
   var oldT = transformText(state.oldText, opts);
   var newT = transformText(state.newText, opts);
-  var changes = computeLineDiff(oldT, newT, { ignoreWhitespace: state.ignore.whitespace });
-  return classifyChanges(changes);
+  var oldNl = /\\r?\\n$/.test(oldT), newNl = /\\r?\\n$/.test(newT);
+  var oldComparable = oldNl ? oldT.replace(/\\r?\\n$/, '') : oldT;
+  var newComparable = newNl ? newT.replace(/\\r?\\n$/, '') : newT;
+  var changes = computeLineDiff(oldComparable, newComparable, { ignoreWhitespace: state.ignore.whitespace });
+  var classified = classifyChanges(changes);
+  if (oldNl !== newNl) classified.push({ type: 'eof', oldHasFinalNewline: oldNl, newHasFinalNewline: newNl });
+  return classified;
 }
 
 function renderInline(oldC, newC, side) {
@@ -363,7 +374,7 @@ function shareDiff() {
   var btn = document.getElementById('btn-share');
   btn.textContent = '\\u5206\\u4eab\\u4e2d...';
   btn.disabled = true;
-  var body = JSON.stringify({ old: state.oldText, new: state.newText });
+  var body = JSON.stringify({ version: 2, compressed: LZString.compressToBase64(JSON.stringify({ old: state.oldText, new: state.newText })) });
   fetch('https://api.github.com/repos/' + state.share.repo + '/issues', {
     method: 'POST',
     headers: { 'Authorization': 'token ' + state.share.token, 'Content-Type': 'application/json' },
@@ -375,6 +386,15 @@ function shareDiff() {
   }).then(function(res) {
     if (!res.ok) throw new Error('GitHub API error: ' + res.status);
     return res.json();
+  }).then(function(data) {
+    return fetch('https://api.github.com/repos/' + state.share.repo + '/issues/' + data.number, {
+      method: 'PATCH',
+      headers: { 'Authorization': 'token ' + state.share.token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state: 'closed' }),
+    }).then(function(closeRes) {
+      if (!closeRes.ok) throw new Error('Issue created but could not be closed: ' + closeRes.status);
+      return data;
+    });
   }).then(function(data) {
     var url = state.share.baseUrl.replace(/\\/+$/, '') + '#issue=' + data.number;
     return navigator.clipboard.writeText(url).then(function() {
@@ -404,6 +424,7 @@ export function exportFullHtml() {
     precision: store.precision,
     foldUnchangedLines: store.foldUnchangedLines,
     wrapLines: store.wrapLines,
+    syntaxLang: store.syntaxLang,
     ignore: { ...store.ignore },
     transform: { ...store.transform },
     share: {

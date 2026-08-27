@@ -1,5 +1,42 @@
 <script setup>
+import { ref, watch, nextTick, onBeforeUnmount } from 'vue'
 import { store } from '../../store/diff-store.js'
+
+const oldDraft = ref(store.oldText)
+const newDraft = ref(store.newText)
+const oldTextarea = ref(null)
+const newTextarea = ref(null)
+let timer
+
+watch(() => store.oldText, value => { if (value !== oldDraft.value) oldDraft.value = value })
+watch(() => store.newText, value => { if (value !== newDraft.value) newDraft.value = value })
+watch([oldDraft, newDraft], () => {
+  clearTimeout(timer)
+  timer = setTimeout(flush, 120)
+})
+
+watch(() => store.editTarget, async target => {
+  if (!target) return
+  await nextTick()
+  const textarea = target.side === 'old' ? oldTextarea.value : newTextarea.value
+  const text = target.side === 'old' ? oldDraft.value : newDraft.value
+  if (!textarea) return
+  const lines = text.split(/\r?\n/)
+  const lineIndex = Math.max(0, Math.min(lines.length - 1, target.lineNo - 1))
+  const newline = text.includes('\r\n') ? '\r\n' : '\n'
+  const start = lines.slice(0, lineIndex).join(newline).length + (lineIndex ? newline.length : 0)
+  textarea.focus()
+  textarea.setSelectionRange(start, start + lines[lineIndex].length)
+  store.editTarget = null
+})
+
+function flush() {
+  clearTimeout(timer)
+  store.oldText = oldDraft.value
+  store.newText = newDraft.value
+}
+
+onBeforeUnmount(flush)
 </script>
 
 <template>
@@ -13,7 +50,8 @@ import { store } from '../../store/diff-store.js'
         <div class="editor-col-header">原始文本</div>
         <textarea
           class="editor-textarea"
-          v-model="store.oldText"
+          ref="oldTextarea"
+          v-model="oldDraft"
           placeholder="粘贴原始文本..."
           spellcheck="false"
         ></textarea>
@@ -22,7 +60,8 @@ import { store } from '../../store/diff-store.js'
         <div class="editor-col-header">修改文本</div>
         <textarea
           class="editor-textarea"
-          v-model="store.newText"
+          ref="newTextarea"
+          v-model="newDraft"
           placeholder="粘贴修改后的文本..."
           spellcheck="false"
         ></textarea>
